@@ -1,0 +1,22 @@
+schema = 3
+
+[mod]
+  [mod.'github.com/google/uuid']
+    version = 'v1.6.0'
+    hash = 'sha256-VWl9sqUzdOuhW0KzQlv0gwwUQClYkmZwSydHG2sALYw='
+
+  [mod.'github.com/prometheus-community/pro-bing']
+    version = 'v0.8.0'
+    hash = 'sha256-O4ltgy/tZNrkJMqb3hmNlVDPxS/oRsrscFdCDU8GtFM='
+
+  [mod.'golang.org/x/net']
+    version = 'v0.49.0'
+    hash = 'sha256-arK6PWwO9tQUJVb57QXUEXfgcB6ISI6qjVB0eC4zcnw='
+
+  [mod.'golang.org/x/sync']
+    version = 'v0.19.0'
+    hash = 'sha256-RbRZ+sKZUurOczGhhzOoY/sojTlta3H9XjL4PXX/cno='
+
+  [mod.'golang.org/x/sys']
+    version = 'v0.40.0'
+    hash = 'sha256-KDe+wMr7dfMFwKMJEljzk+f82pQWFFPoFHivjD7qJGg='

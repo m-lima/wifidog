@@ -8,20 +8,29 @@
         nixpkgs.follows = "nixpkgs";
       };
     };
+    gomod2nix = {
+      url = "github:nix-community/gomod2nix";
+      inputs = {
+        nixpkgs.follows = "nixpkgs";
+        flake-utils.follows = "flake-utils";
+      };
+    };
   };
 
   outputs =
     {
+      self,
       nixpkgs,
       flake-utils,
       treefmt-nix,
+      gomod2nix,
       ...
-    }@inputs:
+    }:
     flake-utils.lib.eachDefaultSystem (
       system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
-        lib = pkgs.lib;
+        go2nix = gomod2nix.legacyPackages.${system};
         treefmt =
           (treefmt-nix.lib.evalModule pkgs {
             projectRootFile = "flake.nix";
@@ -29,9 +38,10 @@
               nixfmt.enable = true;
               gofumpt.enable = true;
               goimports.enable = true;
-              golangci-lint.enable = true;
+              yamlfmt.enable = true;
             };
             settings = {
+              on-unmatched = "warn";
               excludes = [
                 "*.lock"
                 ".direnv/*"
@@ -39,19 +49,43 @@
                 ".gitignore"
                 "LICENSE"
                 "result*/*"
+                "gomod2nix.toml"
               ];
             };
           }).config.build;
       in
       {
+        packages.default = go2nix.buildGoApplication {
+          pname = "wifidog";
+          version = "0.0.1";
+          src = ./.;
+          pwd = ./.;
+        };
+        checks = {
+          formatting = treefmt.check self;
+          lint = go2nix.buildGoApplication {
+            name = "lint";
+            src = ./.;
+            pwd = ./.;
+            dontBuild = true;
+            doCheck = true;
+            nativeBuildInputs = [
+              pkgs.golangci-lint
+              pkgs.writableTmpDirAsHomeHook
+            ];
+            checkPhase = "golangci-lint run";
+            installPhase = "mkdir $out";
+          };
+        };
         formatter = treefmt.wrapper;
         devShells.default = pkgs.mkShell {
           buildInputs = [
+            go2nix.gomod2nix
             pkgs.go
             pkgs.gopls
             pkgs.gofumpt
-            pkgs.golangci-lint-langserver
             pkgs.golangci-lint
+            pkgs.golangci-lint-langserver
           ];
         };
       }
