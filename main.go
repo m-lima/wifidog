@@ -18,9 +18,7 @@ func ping(targetIP string) bool {
 		os.Exit(1)
 	}
 
-	pinger.Count = 6
-	pinger.Timeout = time.Second * 30
-	pinger.Interval = time.Second * 5
+	pinger.Timeout = time.Second * 10
 
 	pinger.OnRecv = func(pkt *probing.Packet) {
 		success = true
@@ -38,7 +36,7 @@ func ping(targetIP string) bool {
 func getSleep(failures int8) time.Duration {
 	switch failures {
 	case 0:
-		return 10 * time.Second
+		return 15 * time.Second
 	case 1:
 		return 30 * time.Second
 	case 2:
