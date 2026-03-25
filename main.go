@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/prometheus-community/pro-bing"
+	probing "github.com/prometheus-community/pro-bing"
 )
 
 func ping(targetIP string) bool {
