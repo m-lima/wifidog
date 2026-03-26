@@ -26,5 +26,6 @@
     helper.lib.go.helper inputs ./. {
       pname = "wifidog";
       version = "0.0.1";
+      devPackages = pkgs: [ pkgs.zig ];
     };
 }
