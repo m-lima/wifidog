@@ -8,6 +8,14 @@
         nixpkgs.follows = "nixpkgs";
       };
     };
+    gomod2nix = {
+      url = "github:nix-community/gomod2nix";
+      inputs = {
+        nixpkgs.follows = "nixpkgs";
+        flake-utils.follows = "flake-utils";
+      };
+    };
+    helper.url = "github:m-lima/nix-template";
     zig = {
       url = "github:mitchellh/zig-overlay";
       inputs = {
@@ -19,94 +27,83 @@
 
   outputs =
     {
-      self,
       nixpkgs,
       flake-utils,
-      treefmt-nix,
+      helper,
       zig,
       ...
-    }:
+    }@inputs:
     flake-utils.lib.eachDefaultSystem (
       system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
         lib = pkgs.lib;
-        zigPkg = zig.packages.${system}.default;
 
-        fmtConfig = {
-          projectRootFile = "flake.nix";
-          programs = {
-            nixfmt.enable = true;
-            yamlfmt.enable = true;
+        go = helper.lib.go.helper inputs system ./go {
+          pname = "wifidog";
+          version = "0.0.1";
+
+          formatters = {
             zig.enable = true;
           };
-          settings = {
-            on-unmatched = "warn";
-            excludes = [
-              "**/.direnv/*"
-              "**/.envrc"
-              "**/.gitignore"
-              "*.lock"
-              ".direnv/*"
-              ".envrc"
-              ".git-crypt/*"
-              ".gitattributes"
-              ".gitignore"
-              ".zig-cache/*"
-              "LICENSE"
-              "result*/*"
-              "zig-build/*"
-            ];
-          };
-
+          fmtExcludes = [
+            ".zig-cache/*"
+            "zig-build/*"
+          ];
         };
 
-        treefmt = (treefmt-nix.lib.evalModule pkgs fmtConfig).config.build;
-        src =
+        zigPkg = zig.packages.${system}.default;
+        zigSrc =
           let
             fs = lib.fileset;
           in
           fs.toSource {
-            root = ./.;
-            fileset = fs.intersection (fs.fromSource (lib.sources.cleanSource ./.)) (
+            root = ./zig;
+            fileset = fs.intersection (fs.fromSource (lib.sources.cleanSource ./zig)) (
               fs.unions [
-                ./src
-                ./build.zig
-                ./build.zig.zon
+                ./zig/src
+                ./zig/build.zig
+                ./zig/build.zig.zon
               ]
             );
           };
       in
-      {
-        packages.default = pkgs.stdenv.mkDerivation {
-          pname = "wifidog";
-          version = "0.0.1";
+      go
+      // {
+        packages = {
+          go = go.packages.default;
+          zig = pkgs.stdenv.mkDerivation {
+            pname = "wifidog";
+            version = "0.0.1";
 
-          inherit src;
+            src = zigSrc;
 
-          nativeBuildInputs = [ zigPkg ];
+            nativeBuildInputs = [ zigPkg ];
 
-          dontInstall = true;
+            dontInstall = true;
 
-          configurePhase = ''
-            runHook preConfigure
-            export ZIG_GLOBAL_CACHE_DIR=$TEMP/.cache
-            runHook postConfigure
-          '';
+            configurePhase = ''
+              runHook preConfigure
+              export ZIG_GLOBAL_CACHE_DIR=$TEMP/.cache
+              runHook postConfigure
+            '';
 
-          buildPhase = ''
-            runHook preBuild
-            zig build install --color off --prefix $out
-            runHook postBuild
-          '';
+            buildPhase = ''
+              runHook preBuild
+              zig build install --color off --prefix $out
+              runHook postBuild
+            '';
+          };
         };
+        checks = (builtins.removeAttrs go.checks [ "lint" ]) // {
+          goLint = go.checks.lint // {
+            name = "go-lint";
+          };
 
-        checks = {
-          formatting = treefmt.check self;
-          test = pkgs.stdenv.mkDerivation {
+          zigTest = pkgs.stdenv.mkDerivation {
             name = "test";
 
-            inherit src;
+            src = zigSrc;
 
             nativeBuildInputs = [ zigPkg ];
 
@@ -127,16 +124,6 @@
 
             installPhase = "mkdir $out";
           };
-        };
-
-        formatter = treefmt.wrapper;
-
-        devShells.default = pkgs.mkShell {
-          nativeBuildInputs = [
-            zigPkg
-            pkgs.zls
-            # pkgs.zig-zlint
-          ];
         };
       }
     );
