@@ -1,0 +1,13 @@
+.{
+    .name = .wifidog,
+    .version = "0.0.1",
+    .fingerprint = 0xb569b5425b82d82d,
+    .minimum_zig_version = "0.15.2",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "LICENSE",
+    },
+}
