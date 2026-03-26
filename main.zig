@@ -167,33 +167,24 @@ fn getSleep(failures: i8) u64 {
 }
 
 // fn reassociate(allocator: std.mem.Allocator, cmd: []const u8, args: []const []const u8) !bool {
-fn reassociate() !bool {
-    // logln("Reassociating", .{});
-    //
-    // var argv: std.ArrayList([]const u8) = .{};
-    // defer argv.deinit(allocator);
-    //
-    // try argv.append(allocator, cmd);
-    // for (args) |arg| {
-    //     try argv.append(allocator, arg);
-    // }
-    //
-    // var child = std.process.Child.init(argv.items, allocator);
-    // child.stdout_behavior = .Ignore;
-    // child.stderr_behavior = .Ignore;
-    //
-    // const term = child.spawnAndWait() catch |err| {
-    //     log("Failed to call '", .{});
-    //     logCmd(cmd, args);
-    //     logln("': {}", .{err});
-    //     return false;
-    // };
-    //
-    // return switch (term) {
-    //     .Exited => |code| code == 0,
-    //     else => false,
-    // };
-    return false;
+fn reassociate(raw_cmd: []const [*:0]const u8) !bool {
+    logln("Reassociating", .{});
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var cmd = try allocator.alloc([]const u8, raw_cmd.len);
+    for (raw_cmd, 0..) |arg, i| {
+        cmd[i] = std.mem.span(arg);
+    }
+
+    var child = std.process.Child.init(cmd, allocator);
+    const term = try child.spawnAndWait();
+    return switch (term) {
+        .Exited => |code| code == 0,
+        else => false,
+    };
 }
 
 pub fn main() !void {
@@ -225,8 +216,7 @@ pub fn main() !void {
         if (try ping(target_addr)) {
             failures = 0;
         } else {
-            // if (try reassociate(allocator, reassociateCmd, reassociateCmdArgs)) {
-            if (try reassociate()) {
+            if (try reassociate(reassociateCmd)) {
                 if (failures < 5) {
                     failures += 1;
                 }
