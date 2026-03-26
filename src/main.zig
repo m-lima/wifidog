@@ -110,7 +110,7 @@ fn ping(target_addr: std.net.Address) !bool {
             &target_addr.any,
             target_addr.getOsSockLen(),
         ) catch |e| {
-            logln("ERR: Failed to send: {}", .{e});
+            logln("ERR {d}: Failed to send: {}", .{ i, e });
             continue;
         };
 
@@ -127,7 +127,7 @@ fn ping(target_addr: std.net.Address) !bool {
             null,
             null,
         ) catch |e| {
-            logln("ERR: Receive error: {}", .{e});
+            logln("ERR {d}: Receive error: {}", .{ i, e });
             continue;
         };
 
@@ -135,7 +135,7 @@ fn ping(target_addr: std.net.Address) !bool {
             const ip_header_len = (recv_buf[0] & 0x0F) * 4;
             icmp_packet = recv_buf[ip_header_len..recv_len];
             if (calculateChecksum(icmp_packet) != 0) {
-                logln("ERR: Checksum is not zero", .{});
+                logln("ERR {d}: Checksum is not zero", .{i});
                 continue;
             }
         } else {
@@ -143,12 +143,15 @@ fn ping(target_addr: std.net.Address) !bool {
         }
 
         if (icmp_packet.len < @sizeOf(IcmpHeader)) {
-            logln("ERR: Bad length ({d} < {d})", .{ icmp_packet.len, @sizeOf(IcmpHeader) });
+            logln("ERR {d}: Bad length ({d} < {d})", .{ i, icmp_packet.len, @sizeOf(IcmpHeader) });
             continue;
         }
 
         const reply_type = icmp_packet[0];
         if (reply_type == ICMP_ECHOREPLY) {
+            if (i > 0) {
+                logln("Ok {d}: Recovered connection", .{i});
+            }
             return true;
         }
     }
