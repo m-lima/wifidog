@@ -112,7 +112,6 @@
 
             dontBuild = true;
             doCheck = true;
-            dontInstall = true;
 
             configurePhase = ''
               runHook preConfigure
@@ -120,7 +119,12 @@
               runHook postConfigure
             '';
 
-            checkPhase = "zig build test";
+            buildPhase = ''
+              runHook preBuild
+              zig build test --color off
+              runHook postBuild
+            '';
+
             installPhase = "mkdir $out";
           };
         };
