@@ -8,14 +8,6 @@
         nixpkgs.follows = "nixpkgs";
       };
     };
-    gomod2nix = {
-      url = "github:nix-community/gomod2nix";
-      inputs = {
-        nixpkgs.follows = "nixpkgs";
-        flake-utils.follows = "flake-utils";
-      };
-    };
-    helper.url = "github:m-lima/nix-template";
   };
 
   outputs =
