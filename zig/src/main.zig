@@ -195,62 +195,54 @@ const Metrics = struct {
 
     const Self = @This();
 
-    fn inc_ping_err(self: *Self, amount: u8) void {
-        if (self.path.len == 0) {
-            return;
-        }
-
-        self.ping_err +|= amount;
-        self.emit() catch |e| {
-            logln("ERR: Failed to write metrics: {}", .{e});
-        };
+    fn inc_ping_err(self: *Self, ping_err: u8) void {
+        self.ping_err +|= ping_err;
+        self.emit();
     }
 
-    fn inc_reconnect_ok(self: *Self) void {
-        if (self.path.len == 0) {
-            return;
-        }
-
+    fn inc_reconnect_ok(self: *Self, ping_err: u8) void {
+        self.ping_err +|= ping_err;
         self.recconnect_ok +|= 1;
-        self.emit() catch |e| {
-            logln("ERR: Failed to write metrics: {}", .{e});
-        };
+        self.emit();
     }
 
-    fn inc_reconnect_err(self: *Self) void {
-        if (self.path.len == 0) {
-            return;
-        }
-
+    fn inc_reconnect_err(self: *Self, ping_err: u8) void {
+        self.ping_err +|= ping_err;
         self.recconnect_err +|= 1;
-        self.emit() catch |e| {
-            logln("ERR: Failed to write metrics: {}", .{e});
-        };
+        self.emit();
     }
 
-    fn emit(self: @This()) !void {
-        const file = try std.fs.cwd().createFile(self.path, .{ .mode = 0o644 });
-        defer file.close();
+    fn emit(self: Self) void {
+        const Inner = struct {
+            fn emit(outer: Self) !void {
+                const file = try std.fs.cwd().createFile(outer.path, .{ .mode = 0o644 });
+                defer file.close();
 
-        var buffer: [4096]u8 = undefined;
+                var buffer: [4096]u8 = undefined;
 
-        var file_writer = file.writer(&buffer);
-        const writer = &file_writer.interface;
+                var file_writer = file.writer(&buffer);
+                const writer = &file_writer.interface;
 
-        try writer.print("# HELP wifidog_ping_error_total Total number of pings that did not get a successful answer\n", .{});
-        try writer.print("# TYPE wifidog_ping_error_total counter\n", .{});
-        try writer.print("wifidog_ping_error_total {d}\n", .{self.ping_err});
-        try writer.print("# HELP wifidog_reconnect_total Total number of reconnect attempetd by success\n", .{});
-        try writer.print("# TYPE wifidog_reconnect_total counter\n", .{});
-        try writer.print("wifidog_reconnect_total{{success=\"true\"}} {d}\n", .{self.recconnect_ok});
-        try writer.print("wifidog_reconnect_total{{success=\"false\"}} {d}\n", .{self.recconnect_err});
-        try writer.flush();
+                try writer.print("# HELP wifidog_ping_error_total Total number of pings that did not get a successful answer\n", .{});
+                try writer.print("# TYPE wifidog_ping_error_total counter\n", .{});
+                try writer.print("wifidog_ping_error_total {d}\n", .{outer.ping_err});
+                try writer.print("# HELP wifidog_reconnect_total Total number of reconnect attempetd by success\n", .{});
+                try writer.print("# TYPE wifidog_reconnect_total counter\n", .{});
+                try writer.print("wifidog_reconnect_total{{success=\"true\"}} {d}\n", .{outer.recconnect_ok});
+                try writer.print("wifidog_reconnect_total{{success=\"false\"}} {d}\n", .{outer.recconnect_err});
+                try writer.flush();
+            }
+        };
+
+        Inner.emit(self) catch |e| {
+            logln("ERR: Failed to write metrics: {}", .{e});
+        };
     }
 };
 
 const Args = struct {
     target_ip: std.net.Address,
-    metrics: Metrics,
+    metrics: ?Metrics,
     attempts: u8,
     interval: u8,
     backoff_success: u8,
@@ -337,12 +329,7 @@ const Args = struct {
     fn parse(input: []const [*:0]const u8) Result(Self) {
         var args = Self{
             .target_ip = undefined,
-            .metrics = Metrics{
-                .path = &.{},
-                .ping_err = undefined,
-                .recconnect_ok = undefined,
-                .recconnect_err = undefined,
-            },
+            .metrics = null,
             .attempts = 0,
             .interval = 0,
             .backoff_success = 0,
@@ -452,10 +439,6 @@ const Args = struct {
         return .{ .ok = args };
     }
 
-    fn has_metrics(self: Self) bool {
-        return self.metrics.path.len > 0;
-    }
-
     fn display(self: Self) void {
         logln("Args (", .{});
         logln("  target_ip: {f}", .{self.target_ip});
@@ -464,8 +447,8 @@ const Args = struct {
         logln("  backoff_success: {d}s", .{self.backoff_success});
         logln("  backoff_fail: {d}s", .{self.backoff_fail});
         logln("  backoff_error: {d}m", .{self.backoff_error});
-        if (self.metrics.path.len > 0) {
-            logln("  metrics: '{s}'", .{self.metrics.path});
+        if (self.metrics) |metrics| {
+            logln("  metrics: '{s}'", .{metrics.path});
         }
         if (self.command.len > 0) {
             log("  command: '{s}", .{self.command[0]});
@@ -504,23 +487,32 @@ pub fn main() !void {
     logln("Starting wifi watchdog", .{});
     args.display();
 
+    if (args.metrics) |metrics| {
+        metrics.emit();
+    }
+
     var failures: u8 = 0;
 
     while (true) {
         const attempts = try ping(args);
         if (attempts < args.attempts) {
             if (attempts > 0) {
-                args.metrics.inc_ping_err(attempts);
+                if (args.metrics) |*metrics| {
+                    metrics.inc_ping_err(attempts);
+                }
             }
             failures = 0;
         } else {
-            args.metrics.ping_err +|= args.attempts;
             if (try reconnect(args)) {
                 failures +|= 1;
-                args.metrics.inc_reconnect_ok();
+                if (args.metrics) |*metrics| {
+                    metrics.inc_reconnect_ok(args.attempts);
+                }
             } else {
                 failures = std.math.maxInt(u8);
-                args.metrics.inc_reconnect_err();
+                if (args.metrics) |*metrics| {
+                    metrics.inc_reconnect_err(args.attempts);
+                }
             }
         }
         std.Thread.sleep(get_sleep(args, failures));

@@ -48,6 +48,9 @@
           };
           fmtExcludes = [
             ".zig-cache/*"
+            "go/go.mod"
+            "go/go.sum"
+            "go/gomod2nix.toml"
             "zig-build/*"
           ];
 
