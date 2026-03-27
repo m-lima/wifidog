@@ -237,11 +237,11 @@ const Metrics = struct {
         var file_writer = file.writer(&buffer);
         const writer = &file_writer.interface;
 
-        try writer.print("HELP wifidog_ping_error_total Total number of pings that did not get a successful answer\n", .{});
-        try writer.print("TYPE wifidog_ping_error_total counter\n", .{});
+        try writer.print("# HELP wifidog_ping_error_total Total number of pings that did not get a successful answer\n", .{});
+        try writer.print("# TYPE wifidog_ping_error_total counter\n", .{});
         try writer.print("wifidog_ping_error_total {d}\n", .{self.ping_err});
-        try writer.print("HELP wifidog_reconnect_total Total number of reconnect attempetd by success\n", .{});
-        try writer.print("TYPE wifidog_reconnect_total counter\n", .{});
+        try writer.print("# HELP wifidog_reconnect_total Total number of reconnect attempetd by success\n", .{});
+        try writer.print("# TYPE wifidog_reconnect_total counter\n", .{});
         try writer.print("wifidog_reconnect_total{{success=\"true\"}} {d}\n", .{self.recconnect_ok});
         try writer.print("wifidog_reconnect_total{{success=\"false\"}} {d}\n", .{self.recconnect_err});
         try writer.flush();
