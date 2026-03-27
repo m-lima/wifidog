@@ -229,7 +229,7 @@ const Metrics = struct {
     }
 
     fn emit(self: @This()) !void {
-        const file = try std.fs.cwd().createFile(self.path, .{});
+        const file = try std.fs.cwd().createFile(self.path, .{ .mode = 0o644 });
         defer file.close();
 
         var buffer: [4096]u8 = undefined;
