@@ -204,6 +204,24 @@ const Args = struct {
 
     const Self = @This();
 
+    fn Result(comptime T: type) type {
+        return union(enum) {
+            ok: T,
+            duplicated_option: []const u8,
+            missing_option: []const u8,
+            invalid_option: []const u8,
+
+            pub fn propagate(self: @This(), comptime R: type) Result(R) {
+                return switch (self) {
+                    .ok => unreachable,
+                    .duplicated_option => |field| .{ .duplicated_option = field },
+                    .missing_option => |field| .{ .missing_option = field },
+                    .invalid_option => |field| .{ .invalid_option = field },
+                };
+            }
+        };
+    }
+
     fn help() void {
         logln("Usage: wifidog -t TARGET_IP [OPTIONS] COMMAND [ARGS...]", .{});
         logln("", .{});
@@ -229,43 +247,38 @@ const Args = struct {
     }
 
     const Parse = struct {
-        fn string(comptime name: []const u8, input: []const [*:0]const u8, target: *[]const u8) void {
+        fn string(comptime name: []const u8, input: []const [*:0]const u8, target: *[]const u8) Result(void) {
             if (target.len > 0) {
-                fatal("Duplicated " ++ name ++ " options", .{});
+                return .{ .duplicated_option = name };
             }
             if (input.len < 2) {
-                fatal("Missing " ++ name ++ " option", .{});
+                return .{ .missing_option = name };
             }
             target.* = std.mem.span(input[1]);
             if (target.len == 0) {
-                fatal("Missing " ++ name ++ " option", .{});
+                return .{ .missing_option = name };
             }
+            return .{ .ok = {} };
         }
 
-        fn int(comptime name: []const u8, input: []const [*:0]const u8, target: *u8) void {
+        fn int(comptime name: []const u8, input: []const [*:0]const u8, target: *u8) Result(void) {
             if (target.* != 0) {
-                fatal("Duplicated " ++ name ++ " options", .{});
+                return .{ .duplicated_option = name };
             }
             if (input.len < 2) {
-                fatal("Missing " ++ name ++ " option", .{});
+                return .{ .missing_option = name };
             }
-            target.* = std.fmt.parseInt(u8, std.mem.span(input[1]), 10) catch |e| {
-                fatal("Invalid " ++ name ++ " option: {}", .{e});
+            target.* = std.fmt.parseInt(u8, std.mem.span(input[1]), 10) catch {
+                return .{ .invalid_option = name };
             };
             if (target.* == 0) {
-                fatal("Invalid " ++ name ++ " option: must be greater than zero", .{});
+                return .{ .invalid_option = name };
             }
-        }
-
-        fn fatal(comptime msg: []const u8, args: anytype) noreturn {
-            logln("ERR: " ++ msg, args);
-            logln("", .{});
-            help();
-            std.process.exit(1);
+            return .{ .ok = {} };
         }
     };
 
-    fn parse(input: []const [*:0]const u8) Self {
+    fn parse(input: []const [*:0]const u8) Result(Self) {
         var args = Self{
             .target_ip = undefined,
             .metrics = &.{},
@@ -283,31 +296,38 @@ const Args = struct {
             if (input[i][0] == '-') {
                 switch (input[i][1]) {
                     't' => {
-                        Parse.string("TARGET_IP", input[i..], &target);
+                        const result = Parse.string("TARGET_IP", input[i..], &target);
+                        if (result != .ok) return result.propagate(Self);
                         i += 1;
                     },
                     'm' => {
-                        Parse.string("METRICS_FILE", input[i..], &args.metrics);
+                        const result = Parse.string("METRICS_FILE", input[i..], &args.metrics);
+                        if (result != .ok) return result.propagate(Self);
                         i += 1;
                     },
                     'a' => {
-                        Parse.int("ATTEMPTS", input[i..], &args.attempts);
+                        const result = Parse.int("ATTEMPTS", input[i..], &args.attempts);
+                        if (result != .ok) return result.propagate(Self);
                         i += 1;
                     },
                     'i' => {
-                        Parse.int("INTERVAL", input[i..], &args.interval);
+                        const result = Parse.int("INTERVAL", input[i..], &args.interval);
+                        if (result != .ok) return result.propagate(Self);
                         i += 1;
                     },
                     's' => {
-                        Parse.int("SUCCESS_BACKOFF", input[i..], &args.backoff_success);
+                        const result = Parse.int("SUCCESS_BACKOFF", input[i..], &args.backoff_success);
+                        if (result != .ok) return result.propagate(Self);
                         i += 1;
                     },
                     'f' => {
-                        Parse.int("FAIL_BACKOFF", input[i..], &args.backoff_fail);
+                        const result = Parse.int("FAIL_BACKOFF", input[i..], &args.backoff_fail);
+                        if (result != .ok) return result.propagate(Self);
                         i += 1;
                     },
                     'e' => {
-                        Parse.int("ERROR_BACKOFF", input[i..], &args.backoff_error);
+                        const result = Parse.int("ERROR_BACKOFF", input[i..], &args.backoff_error);
+                        if (result != .ok) return result.propagate(Self);
                         i += 1;
                     },
                     'h' => {
@@ -315,7 +335,7 @@ const Args = struct {
                         std.process.exit(0);
                     },
                     else => {
-                        Parse.fatal("Invalid option", .{});
+                        return .{ .invalid_option = "unknown flag" };
                     },
                 }
             } else {
@@ -327,11 +347,11 @@ const Args = struct {
         args.command = input[i..];
 
         if (target.len == 0) {
-            Parse.fatal("Missing TARGET_IP option", .{});
+            return .{ .missing_option = "TARGET_IP" };
         }
 
-        args.target_ip = std.net.Address.parseIp4(target, 0) catch |e| {
-            Parse.fatal("Invalid IP address '{s}': {}", .{ target, e });
+        args.target_ip = std.net.Address.parseIp4(target, 0) catch {
+            return .{ .invalid_option = "TARGET_IP" };
         };
 
         if (args.attempts == 0) {
@@ -355,10 +375,10 @@ const Args = struct {
         }
 
         if (args.command.len == 0) {
-            Parse.fatal("Missing COMMAND option", .{});
+            return .{ .missing_option = "COMMAND" };
         }
 
-        return args;
+        return .{ .ok = args };
     }
 
     fn display(self: Self) void {
@@ -384,7 +404,28 @@ const Args = struct {
 };
 
 pub fn main() !void {
-    const args = Args.parse(std.os.argv);
+    const parse_result = Args.parse(std.os.argv);
+    const args = switch (parse_result) {
+        .ok => |a| a,
+        .duplicated_option => |field| {
+            logln("ERR: Duplicated {s} option", .{field});
+            logln("", .{});
+            Args.help();
+            std.process.exit(1);
+        },
+        .missing_option => |field| {
+            logln("ERR: Missing {s} option", .{field});
+            logln("", .{});
+            Args.help();
+            std.process.exit(1);
+        },
+        .invalid_option => |field| {
+            logln("ERR: Invalid {s} option", .{field});
+            logln("", .{});
+            Args.help();
+            std.process.exit(1);
+        },
+    };
 
     logln("Starting wifi watchdog", .{});
     args.display();
@@ -414,7 +455,9 @@ test "Args.parse with minimal arguments" {
         "reassociate",
     };
 
-    const args = Args.parse(&argv);
+    const result = Args.parse(&argv);
+    try std.testing.expect(result == .ok);
+    const args = result.ok;
 
     try std.testing.expectEqual(10, args.attempts);
     try std.testing.expectEqual(1, args.interval);
@@ -452,7 +495,9 @@ test "Args.parse with all options" {
         "arg2",
     };
 
-    const args = Args.parse(&argv);
+    const result = Args.parse(&argv);
+    try std.testing.expect(result == .ok);
+    const args = result.ok;
 
     try std.testing.expectEqual(5, args.attempts);
     try std.testing.expectEqual(2, args.interval);
@@ -476,12 +521,137 @@ test "Args.parse with command that has flags" {
         "echo test",
     };
 
-    const args = Args.parse(&argv);
+    const result = Args.parse(&argv);
+    try std.testing.expect(result == .ok);
+    const args = result.ok;
 
     try std.testing.expectEqual(3, args.command.len);
     try std.testing.expectEqualStrings("sh", std.mem.span(args.command[0]));
     try std.testing.expectEqualStrings("-c", std.mem.span(args.command[1]));
     try std.testing.expectEqualStrings("echo test", std.mem.span(args.command[2]));
+}
+
+test "Args.parse errors on missing target IP" {
+    const argv = [_][*:0]const u8{
+        "wifidog",
+        "command",
+    };
+
+    const result = Args.parse(&argv);
+    try std.testing.expect(result == .missing_option);
+    try std.testing.expectEqualStrings("TARGET_IP", result.missing_option);
+}
+
+test "Args.parse errors on missing command" {
+    const argv = [_][*:0]const u8{
+        "wifidog",
+        "-t",
+        "192.168.1.1",
+    };
+
+    const result = Args.parse(&argv);
+    try std.testing.expect(result == .missing_option);
+    try std.testing.expectEqualStrings("COMMAND", result.missing_option);
+}
+
+test "Args.parse errors on invalid IP address" {
+    const argv = [_][*:0]const u8{
+        "wifidog",
+        "-t",
+        "not.an.ip",
+        "command",
+    };
+
+    const result = Args.parse(&argv);
+    try std.testing.expect(result == .invalid_option);
+    try std.testing.expectEqualStrings("TARGET_IP", result.invalid_option);
+}
+
+test "Args.parse errors on duplicated target IP" {
+    const argv = [_][*:0]const u8{
+        "wifidog",
+        "-t",
+        "192.168.1.1",
+        "-t",
+        "10.0.0.1",
+        "command",
+    };
+
+    const result = Args.parse(&argv);
+    try std.testing.expect(result == .duplicated_option);
+    try std.testing.expectEqualStrings("TARGET_IP", result.duplicated_option);
+}
+
+test "Args.parse errors on duplicated attempts" {
+    const argv = [_][*:0]const u8{
+        "wifidog",
+        "-t",
+        "192.168.1.1",
+        "-a",
+        "5",
+        "-a",
+        "10",
+        "command",
+    };
+
+    const result = Args.parse(&argv);
+    try std.testing.expect(result == .duplicated_option);
+    try std.testing.expectEqualStrings("ATTEMPTS", result.duplicated_option);
+}
+
+test "Args.parse errors on invalid attempts value" {
+    const argv = [_][*:0]const u8{
+        "wifidog",
+        "-t",
+        "192.168.1.1",
+        "-a",
+        "not_a_number",
+        "command",
+    };
+
+    const result = Args.parse(&argv);
+    try std.testing.expect(result == .invalid_option);
+    try std.testing.expectEqualStrings("ATTEMPTS", result.invalid_option);
+}
+
+test "Args.parse errors on zero attempts value" {
+    const argv = [_][*:0]const u8{
+        "wifidog",
+        "-t",
+        "192.168.1.1",
+        "-a",
+        "0",
+        "command",
+    };
+
+    const result = Args.parse(&argv);
+    try std.testing.expect(result == .invalid_option);
+    try std.testing.expectEqualStrings("ATTEMPTS", result.invalid_option);
+}
+
+test "Args.parse errors on unknown option" {
+    const argv = [_][*:0]const u8{
+        "wifidog",
+        "-t",
+        "192.168.1.1",
+        "-z",
+        "command",
+    };
+
+    const result = Args.parse(&argv);
+    try std.testing.expect(result == .invalid_option);
+    try std.testing.expectEqualStrings("unknown flag", result.invalid_option);
+}
+
+test "Args.parse errors on missing option value" {
+    const argv = [_][*:0]const u8{
+        "wifidog",
+        "-t",
+    };
+
+    const result = Args.parse(&argv);
+    try std.testing.expect(result == .missing_option);
+    try std.testing.expectEqualStrings("TARGET_IP", result.missing_option);
 }
 
 test "get_sleep returns correct values" {
