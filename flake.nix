@@ -50,6 +50,11 @@
             ".zig-cache/*"
             "zig-build/*"
           ];
+
+          devPackages = pkgs: [
+            zigPkg
+            pkgs.zls
+          ];
         };
 
         zigPkg = zig.packages.${system}.default;
