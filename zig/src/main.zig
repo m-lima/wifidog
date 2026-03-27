@@ -514,6 +514,7 @@ pub fn main() !void {
             }
             failures = 0;
         } else {
+            args.metrics.ping_err +|= args.attempts;
             if (try reconnect(args)) {
                 failures +|= 1;
                 args.metrics.inc_reconnect_ok();
