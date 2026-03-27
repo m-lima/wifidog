@@ -1,12 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const Metrics = struct {
-    path: [*:0]const u8,
-    failures: u64,
-    reassociations: u64,
-};
-
 fn log(
     comptime format: []const u8,
     args: anytype,
@@ -61,7 +55,7 @@ fn checksum(data: []const u8) u16 {
     return @truncate(~sum);
 }
 
-fn ping(args: Args) !bool {
+fn ping(args: Args) !u8 {
     const ICMP_ECHO = 8;
     const ICMP_ECHOREPLY = 0;
 
@@ -121,7 +115,7 @@ fn ping(args: Args) !bool {
         };
 
         if (sent != packet.len) {
-            return false;
+            continue;
         }
 
         var recv_buf: [256]u8 = undefined;
@@ -158,10 +152,11 @@ fn ping(args: Args) !bool {
             if (i > 0) {
                 logln("Ok {d}: Recovered connection", .{i});
             }
-            return true;
+            return @intCast(i);
         }
     }
-    return false;
+
+    return args.attempts;
 }
 
 fn get_sleep(args: Args, failures: u8) u64 {
@@ -192,9 +187,70 @@ fn reconnect(args: Args) !bool {
     };
 }
 
+const Metrics = struct {
+    path: []const u8,
+    ping_err: u32,
+    recconnect_ok: u32,
+    recconnect_err: u32,
+
+    const Self = @This();
+
+    fn inc_ping_err(self: *Self, amount: u8) void {
+        if (self.path.len == 0) {
+            return;
+        }
+
+        self.ping_err +|= amount;
+        self.emit() catch |e| {
+            logln("ERR: Failed to write metrics: {}", .{e});
+        };
+    }
+
+    fn inc_reconnect_ok(self: *Self) void {
+        if (self.path.len == 0) {
+            return;
+        }
+
+        self.recconnect_ok +|= 1;
+        self.emit() catch |e| {
+            logln("ERR: Failed to write metrics: {}", .{e});
+        };
+    }
+
+    fn inc_reconnect_err(self: *Self) void {
+        if (self.path.len == 0) {
+            return;
+        }
+
+        self.recconnect_err +|= 1;
+        self.emit() catch |e| {
+            logln("ERR: Failed to write metrics: {}", .{e});
+        };
+    }
+
+    fn emit(self: @This()) !void {
+        const file = try std.fs.cwd().createFile(self.path, .{});
+        defer file.close();
+
+        var buffer: [4096]u8 = undefined;
+
+        var file_writer = file.writer(&buffer);
+        const writer = &file_writer.interface;
+
+        try writer.print("HELP wifidog_ping_error_total Total number of pings that did not get a successful answer\n", .{});
+        try writer.print("TYPE wifidog_ping_error_total counter\n", .{});
+        try writer.print("wifidog_ping_error_total {d}\n", .{self.ping_err});
+        try writer.print("HELP wifidog_reconnect_total Total number of reconnect attempetd by success\n", .{});
+        try writer.print("TYPE wifidog_reconnect_total counter\n", .{});
+        try writer.print("wifidog_reconnect_total{{success=\"true\"}} {d}\n", .{self.recconnect_ok});
+        try writer.print("wifidog_reconnect_total{{success=\"false\"}} {d}\n", .{self.recconnect_err});
+        try writer.flush();
+    }
+};
+
 const Args = struct {
     target_ip: std.net.Address,
-    metrics: []const u8,
+    metrics: Metrics,
     attempts: u8,
     interval: u8,
     backoff_success: u8,
@@ -281,7 +337,12 @@ const Args = struct {
     fn parse(input: []const [*:0]const u8) Result(Self) {
         var args = Self{
             .target_ip = undefined,
-            .metrics = &.{},
+            .metrics = Metrics{
+                .path = &.{},
+                .ping_err = undefined,
+                .recconnect_ok = undefined,
+                .recconnect_err = undefined,
+            },
             .attempts = 0,
             .interval = 0,
             .backoff_success = 0,
@@ -289,19 +350,20 @@ const Args = struct {
             .backoff_error = 0,
             .command = &.{},
         };
-        var target: []const u8 = &.{};
+        var target_ip: []const u8 = &.{};
+        var metrics: []const u8 = &.{};
 
         var i: usize = 1;
         while (i < input.len) {
             if (input[i][0] == '-') {
                 switch (input[i][1]) {
                     't' => {
-                        const result = Parse.string("TARGET_IP", input[i..], &target);
+                        const result = Parse.string("TARGET_IP", input[i..], &target_ip);
                         if (result != .ok) return result.propagate(Self);
                         i += 1;
                     },
                     'm' => {
-                        const result = Parse.string("METRICS_FILE", input[i..], &args.metrics);
+                        const result = Parse.string("METRICS_FILE", input[i..], &metrics);
                         if (result != .ok) return result.propagate(Self);
                         i += 1;
                     },
@@ -346,13 +408,22 @@ const Args = struct {
 
         args.command = input[i..];
 
-        if (target.len == 0) {
+        if (target_ip.len == 0) {
             return .{ .missing_option = "TARGET_IP" };
         }
 
-        args.target_ip = std.net.Address.parseIp4(target, 0) catch {
+        args.target_ip = std.net.Address.parseIp4(target_ip, 0) catch {
             return .{ .invalid_option = "TARGET_IP" };
         };
+
+        if (metrics.len > 0) {
+            args.metrics = Metrics{
+                .path = metrics,
+                .ping_err = 0,
+                .recconnect_ok = 0,
+                .recconnect_err = 0,
+            };
+        }
 
         if (args.attempts == 0) {
             args.attempts = 10;
@@ -381,6 +452,10 @@ const Args = struct {
         return .{ .ok = args };
     }
 
+    fn has_metrics(self: Self) bool {
+        return self.metrics.path.len > 0;
+    }
+
     fn display(self: Self) void {
         logln("Args (", .{});
         logln("  target_ip: {f}", .{self.target_ip});
@@ -389,8 +464,8 @@ const Args = struct {
         logln("  backoff_success: {d}s", .{self.backoff_success});
         logln("  backoff_fail: {d}s", .{self.backoff_fail});
         logln("  backoff_error: {d}m", .{self.backoff_error});
-        if (self.metrics.len > 0) {
-            logln("  metrics: '{s}'", .{self.metrics});
+        if (self.metrics.path.len > 0) {
+            logln("  metrics: '{s}'", .{self.metrics.path});
         }
         if (self.command.len > 0) {
             log("  command: '{s}", .{self.command[0]});
@@ -404,8 +479,7 @@ const Args = struct {
 };
 
 pub fn main() !void {
-    const parse_result = Args.parse(std.os.argv);
-    const args = switch (parse_result) {
+    var args = switch (Args.parse(std.os.argv)) {
         .ok => |a| a,
         .duplicated_option => |field| {
             logln("ERR: Duplicated {s} option", .{field});
@@ -433,13 +507,19 @@ pub fn main() !void {
     var failures: u8 = 0;
 
     while (true) {
-        if (try ping(args)) {
+        const attempts = try ping(args);
+        if (attempts < args.attempts) {
+            if (attempts > 0) {
+                args.metrics.inc_ping_err(attempts);
+            }
             failures = 0;
         } else {
             if (try reconnect(args)) {
                 failures +|= 1;
+                args.metrics.inc_reconnect_ok();
             } else {
                 failures = std.math.maxInt(u8);
+                args.metrics.inc_reconnect_err();
             }
         }
         std.Thread.sleep(get_sleep(args, failures));
