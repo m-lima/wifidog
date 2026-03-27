@@ -101,7 +101,7 @@ fn ping(args: Args) !bool {
             .sequence = std.mem.nativeToBig(u16, @intCast(i)),
         };
 
-        var packet = [_]u8{0} ** 8;
+        var packet = [_]u8{0} ** @sizeOf(IcmpHeader);
         @memcpy(packet[0..@sizeOf(IcmpHeader)], std.mem.asBytes(&header));
 
         if (builtin.os.tag == .macos) {
@@ -166,9 +166,9 @@ fn ping(args: Args) !bool {
 
 fn get_sleep(args: Args, failures: u8) u64 {
     return switch (failures) {
-        0 => @as(u64, args.backoff_success) * std.time.ns_per_s,
-        1, 2, 3, 4 => @as(u64, args.backoff_fail) * @as(u64, failures) * std.time.ns_per_s,
-        else => @as(u64, args.backoff_error) * std.time.ns_per_min,
+        0 => @as(u64, args.backoff_success) *| std.time.ns_per_s,
+        1, 2, 3, 4 => (@as(u64, args.backoff_fail) * @as(u64, failures)) *| std.time.ns_per_s,
+        else => @as(u64, args.backoff_error) *| std.time.ns_per_min,
     };
 }
 
@@ -396,11 +396,9 @@ pub fn main() !void {
             failures = 0;
         } else {
             if (try reconnect(args)) {
-                if (failures < 5) {
-                    failures += 1;
-                }
+                failures +|= 1;
             } else {
-                failures = 5;
+                failures = std.math.maxInt(u8);
             }
         }
         std.Thread.sleep(get_sleep(args, failures));
