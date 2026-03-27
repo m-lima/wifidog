@@ -404,3 +404,120 @@ pub fn main() !void {
         std.Thread.sleep(get_sleep(args, failures));
     }
 }
+
+test "Args.parse with minimal arguments" {
+    const argv = [_][*:0]const u8{
+        "wifidog",
+        "-t",
+        "192.168.1.1",
+        "wpa_cli",
+        "reassociate",
+    };
+
+    const args = Args.parse(&argv);
+
+    try std.testing.expectEqual(10, args.attempts);
+    try std.testing.expectEqual(1, args.interval);
+    try std.testing.expectEqual(15, args.backoff_success);
+    try std.testing.expectEqual(30, args.backoff_fail);
+    try std.testing.expectEqual(5, args.backoff_error);
+    try std.testing.expectEqualStrings("", args.metrics);
+    try std.testing.expectEqual(2, args.command.len);
+    try std.testing.expectEqualStrings("wpa_cli", std.mem.span(args.command[0]));
+    try std.testing.expectEqualStrings("reassociate", std.mem.span(args.command[1]));
+
+    const expected_ip = try std.net.Address.parseIp4("192.168.1.1", 0);
+    try std.testing.expectEqual(expected_ip.in.sa.addr, args.target_ip.in.sa.addr);
+}
+
+test "Args.parse with all options" {
+    const argv = [_][*:0]const u8{
+        "wifidog",
+        "-t",
+        "10.0.0.1",
+        "-m",
+        "/tmp/metrics.prom",
+        "-a",
+        "5",
+        "-i",
+        "2",
+        "-s",
+        "20",
+        "-f",
+        "40",
+        "-e",
+        "10",
+        "reconnect",
+        "arg1",
+        "arg2",
+    };
+
+    const args = Args.parse(&argv);
+
+    try std.testing.expectEqual(5, args.attempts);
+    try std.testing.expectEqual(2, args.interval);
+    try std.testing.expectEqual(20, args.backoff_success);
+    try std.testing.expectEqual(40, args.backoff_fail);
+    try std.testing.expectEqual(10, args.backoff_error);
+    try std.testing.expectEqualStrings("/tmp/metrics.prom", args.metrics);
+    try std.testing.expectEqual(3, args.command.len);
+    try std.testing.expectEqualStrings("reconnect", std.mem.span(args.command[0]));
+    try std.testing.expectEqualStrings("arg1", std.mem.span(args.command[1]));
+    try std.testing.expectEqualStrings("arg2", std.mem.span(args.command[2]));
+}
+
+test "Args.parse with command that has flags" {
+    const argv = [_][*:0]const u8{
+        "wifidog",
+        "-t",
+        "8.8.8.8",
+        "sh",
+        "-c",
+        "echo test",
+    };
+
+    const args = Args.parse(&argv);
+
+    try std.testing.expectEqual(3, args.command.len);
+    try std.testing.expectEqualStrings("sh", std.mem.span(args.command[0]));
+    try std.testing.expectEqualStrings("-c", std.mem.span(args.command[1]));
+    try std.testing.expectEqualStrings("echo test", std.mem.span(args.command[2]));
+}
+
+test "get_sleep returns correct values" {
+    const args = Args{
+        .target_ip = try std.net.Address.parseIp4("127.0.0.1", 0),
+        .metrics = "",
+        .attempts = 10,
+        .interval = 1,
+        .backoff_success = 15,
+        .backoff_fail = 30,
+        .backoff_error = 5,
+        .command = &.{},
+    };
+
+    try std.testing.expectEqual(15 * std.time.ns_per_s, get_sleep(args, 0));
+    try std.testing.expectEqual(30 * 1 * std.time.ns_per_s, get_sleep(args, 1));
+    try std.testing.expectEqual(30 * 2 * std.time.ns_per_s, get_sleep(args, 2));
+    try std.testing.expectEqual(30 * 3 * std.time.ns_per_s, get_sleep(args, 3));
+    try std.testing.expectEqual(30 * 4 * std.time.ns_per_s, get_sleep(args, 4));
+    try std.testing.expectEqual(5 * std.time.ns_per_min, get_sleep(args, 5));
+    try std.testing.expectEqual(5 * std.time.ns_per_min, get_sleep(args, 100));
+}
+
+test "checksum calculates correctly" {
+    const data1 = [_]u8{ 0x08, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01 };
+    const csum = checksum(&data1);
+    try std.testing.expect(csum != 0);
+
+    var data2 = [_]u8{ 0x08, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01 };
+    const csum2 = checksum(&data2);
+    const csum_bytes = std.mem.toBytes(std.mem.nativeToBig(u16, csum2));
+    data2[2] = csum_bytes[0];
+    data2[3] = csum_bytes[1];
+    try std.testing.expectEqual(0, checksum(&data2));
+}
+
+test "IcmpHeader has correct size" {
+    try std.testing.expectEqual(8, @sizeOf(IcmpHeader));
+}
