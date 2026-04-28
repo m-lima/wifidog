@@ -304,7 +304,7 @@ const Metrics = union(MetricsBackend) {
                         };
                         try writer.print("wifidog,{s} {d}\n", .{ msg, time });
                     }
-                    const payload = writer.getWritten();
+                    const payload = writer.buffered();
 
                     _ = try std.posix.sendto(
                         sockfd,
@@ -386,7 +386,7 @@ const Args = struct {
         logln("", .{});
         logln("Options:", .{});
         logln("  -t TARGET_IP        (Required) The IP address of the target network or device.", .{});
-        logln("  -m METRICS_FILE     Path to the file where metrics will be saved.", .{});
+        logln("  -m METRICS_PATH     Metrics output path with format 'prometheus:/path/to/file' or 'telegraf:/path/to/socket'.", .{});
         logln("  -a ATTEMPTS         Total number of attempts to wait for a response (default: 10).", .{});
         logln("  -i INTERVAL         Ping sending interval in seconds (default: 1).", .{});
         logln("  -s SUCCESS_BACKOFF  Time in seconds to wait after a successful check (default: 15).", .{});
@@ -400,7 +400,8 @@ const Args = struct {
         logln("", .{});
         logln("Examples:", .{});
         logln("  wifidog -t 192.168.1.1 wpa_cli reassociate", .{});
-        logln("  wifidog -m output.prom -t 10.0.0.1 -i 10 reconnect", .{});
+        logln("  wifidog -m prometheus:/var/lib/node_exporter/wifidog.prom -t 10.0.0.1 reconnect", .{});
+        logln("  wifidog -m telegraf:/run/telegraf/wifidog.sock -t 10.0.0.1 reconnect", .{});
     }
 
     const Parse = struct {
@@ -459,7 +460,7 @@ const Args = struct {
                         i += 1;
                     },
                     'm' => {
-                        const result = Parse.string("METRICS_FILE", input[i..], &metrics);
+                        const result = Parse.string("METRICS_PATH", input[i..], &metrics);
                         if (result != .ok) return result.propagate(Self);
                         i += 1;
                     },
@@ -513,12 +514,57 @@ const Args = struct {
         };
 
         if (metrics.len > 0) {
-            args.metrics = Metrics{
-                .path = metrics,
-                .ping_err = 0,
-                .recconnect_ok = 0,
-                .recconnect_err = 0,
-            };
+            const prometheus_prefix = "prometheus:";
+            const telegraf_prefix = "telegraf:";
+
+            if (std.mem.startsWith(u8, metrics, prometheus_prefix)) {
+                const path = metrics[prometheus_prefix.len..];
+                if (path.len == 0) {
+                    return .{ .invalid_option = "METRICS_PATH (path cannot be empty)" };
+                }
+                if (path[path.len - 1] == '/') {
+                    return .{ .invalid_option = "METRICS_PATH (path cannot end with '/')" };
+                }
+                args.metrics = Metrics{
+                    .prometheus = .{
+                        .path = path,
+                        .ping_err = 0,
+                        .recconnect_ok = 0,
+                        .recconnect_err = 0,
+                    },
+                };
+            } else if (std.mem.startsWith(u8, metrics, telegraf_prefix)) {
+                const path = metrics[telegraf_prefix.len..];
+                if (path.len == 0) {
+                    return .{ .invalid_option = "METRICS_PATH (path cannot be empty)" };
+                }
+                if (path[path.len - 1] == '/') {
+                    return .{ .invalid_option = "METRICS_PATH (path cannot end with '/')" };
+                }
+
+                var addr = std.posix.sockaddr.un{
+                    .family = std.posix.AF.UNIX,
+                    .path = undefined,
+                };
+
+                if (path.len >= addr.path.len) {
+                    return .{ .invalid_option = "METRICS_PATH (unix socket path too long)" };
+                }
+
+                @memset(&addr.path, 0);
+                @memcpy(addr.path[0..path.len], path);
+
+                args.metrics = Metrics{
+                    .telegraf = .{
+                        .path = addr,
+                        .queue_tag = undefined,
+                        .queue_time = undefined,
+                        .queue_len = 0,
+                    },
+                };
+            } else {
+                return .{ .invalid_option = "METRICS_PATH (must start with 'prometheus:' or 'telegraf:')" };
+            }
         }
 
         if (args.attempts == 0) {
@@ -636,7 +682,7 @@ test "Args.parse with minimal arguments" {
     try std.testing.expectEqual(15, args.backoff_success);
     try std.testing.expectEqual(30, args.backoff_fail);
     try std.testing.expectEqual(5, args.backoff_error);
-    try std.testing.expectEqualStrings("", args.metrics);
+    try std.testing.expect(args.metrics == .none);
     try std.testing.expectEqual(2, args.command.len);
     try std.testing.expectEqualStrings("wpa_cli", std.mem.span(args.command[0]));
     try std.testing.expectEqualStrings("reassociate", std.mem.span(args.command[1]));
@@ -651,7 +697,7 @@ test "Args.parse with all options" {
         "-t",
         "10.0.0.1",
         "-m",
-        "/tmp/metrics.prom",
+        "prometheus:/tmp/metrics.prom",
         "-a",
         "5",
         "-i",
@@ -676,7 +722,8 @@ test "Args.parse with all options" {
     try std.testing.expectEqual(20, args.backoff_success);
     try std.testing.expectEqual(40, args.backoff_fail);
     try std.testing.expectEqual(10, args.backoff_error);
-    try std.testing.expectEqualStrings("/tmp/metrics.prom", args.metrics);
+    try std.testing.expect(args.metrics == .prometheus);
+    try std.testing.expectEqualStrings("/tmp/metrics.prom", args.metrics.prometheus.path);
     try std.testing.expectEqual(3, args.command.len);
     try std.testing.expectEqualStrings("reconnect", std.mem.span(args.command[0]));
     try std.testing.expectEqualStrings("arg1", std.mem.span(args.command[1]));
@@ -829,7 +876,7 @@ test "Args.parse errors on missing option value" {
 test "get_sleep returns correct values" {
     const args = Args{
         .target_ip = try std.net.Address.parseIp4("127.0.0.1", 0),
-        .metrics = "",
+        .metrics = .none,
         .attempts = 10,
         .interval = 1,
         .backoff_success = 15,
@@ -873,7 +920,7 @@ test "Metrics.none does nothing" {
 
 test "PrometheusMetrics accumulates counters" {
     var prom = Metrics.PrometheusMetrics{
-        .path = "/tmp/test.prom",
+        .path = "/nonexistent/path/for/testing/test.prom",
         .ping_err = 0,
         .recconnect_ok = 0,
         .recconnect_err = 0,
@@ -919,4 +966,145 @@ test "TelegrafMetrics resets queue after reaching capacity" {
         tg.inc_ping(true);
     }
     try std.testing.expectEqual(0, tg.queue_len);
+}
+
+test "Args.parse with prometheus metrics" {
+    const argv = [_][*:0]const u8{
+        "wifidog",
+        "-t",
+        "192.168.1.1",
+        "-m",
+        "prometheus:/tmp/metrics.prom",
+        "wpa_cli",
+        "reassociate",
+    };
+
+    const result = Args.parse(&argv);
+    try std.testing.expect(result == .ok);
+    const args = result.ok;
+
+    try std.testing.expect(args.metrics == .prometheus);
+    try std.testing.expectEqualStrings("/tmp/metrics.prom", args.metrics.prometheus.path);
+    try std.testing.expectEqual(0, args.metrics.prometheus.ping_err);
+    try std.testing.expectEqual(0, args.metrics.prometheus.recconnect_ok);
+    try std.testing.expectEqual(0, args.metrics.prometheus.recconnect_err);
+}
+
+test "Args.parse with telegraf metrics" {
+    const argv = [_][*:0]const u8{
+        "wifidog",
+        "-t",
+        "192.168.1.1",
+        "-m",
+        "telegraf:/run/telegraf/wifidog.sock",
+        "wpa_cli",
+        "reassociate",
+    };
+
+    const result = Args.parse(&argv);
+    try std.testing.expect(result == .ok);
+    const args = result.ok;
+
+    try std.testing.expect(args.metrics == .telegraf);
+    try std.testing.expectEqual(0, args.metrics.telegraf.queue_len);
+}
+
+test "Args.parse with no metrics defaults to none" {
+    const argv = [_][*:0]const u8{
+        "wifidog",
+        "-t",
+        "192.168.1.1",
+        "wpa_cli",
+        "reassociate",
+    };
+
+    const result = Args.parse(&argv);
+    try std.testing.expect(result == .ok);
+    const args = result.ok;
+
+    try std.testing.expect(args.metrics == .none);
+}
+
+test "Args.parse errors on empty prometheus path" {
+    const argv = [_][*:0]const u8{
+        "wifidog",
+        "-t",
+        "192.168.1.1",
+        "-m",
+        "prometheus:",
+        "command",
+    };
+
+    const result = Args.parse(&argv);
+    try std.testing.expect(result == .invalid_option);
+}
+
+test "Args.parse errors on empty telegraf path" {
+    const argv = [_][*:0]const u8{
+        "wifidog",
+        "-t",
+        "192.168.1.1",
+        "-m",
+        "telegraf:",
+        "command",
+    };
+
+    const result = Args.parse(&argv);
+    try std.testing.expect(result == .invalid_option);
+}
+
+test "Args.parse errors on prometheus path ending with slash" {
+    const argv = [_][*:0]const u8{
+        "wifidog",
+        "-t",
+        "192.168.1.1",
+        "-m",
+        "prometheus:/tmp/",
+        "command",
+    };
+
+    const result = Args.parse(&argv);
+    try std.testing.expect(result == .invalid_option);
+}
+
+test "Args.parse errors on telegraf path ending with slash" {
+    const argv = [_][*:0]const u8{
+        "wifidog",
+        "-t",
+        "192.168.1.1",
+        "-m",
+        "telegraf:/tmp/",
+        "command",
+    };
+
+    const result = Args.parse(&argv);
+    try std.testing.expect(result == .invalid_option);
+}
+
+test "Args.parse errors on missing metrics prefix" {
+    const argv = [_][*:0]const u8{
+        "wifidog",
+        "-t",
+        "192.168.1.1",
+        "-m",
+        "/tmp/metrics.prom",
+        "command",
+    };
+
+    const result = Args.parse(&argv);
+    try std.testing.expect(result == .invalid_option);
+}
+
+test "Args.parse errors on invalid metrics prefix" {
+    const argv = [_][*:0]const u8{
+        "wifidog",
+        "-t",
+        "192.168.1.1",
+        "-m",
+        "influx:/tmp/metrics",
+        "command",
+    };
+
+    const result = Args.parse(&argv);
+    try std.testing.expect(result == .invalid_option);
 }
