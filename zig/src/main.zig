@@ -196,6 +196,7 @@ fn reconnect(args: Args) !bool {
 }
 
 const MetricsBackend = enum {
+    none,
     prometheus,
     telegraf,
 };
@@ -437,7 +438,7 @@ const Args = struct {
     fn parse(input: []const [*:0]const u8) Result(Self) {
         var args = Self{
             .target_ip = undefined,
-            .metrics = null,
+            .metrics = .none,
             .attempts = 0,
             .interval = 0,
             .backoff_success = 0,
@@ -861,4 +862,61 @@ test "checksum calculates correctly" {
 
 test "IcmpHeader has correct size" {
     try std.testing.expectEqual(8, @sizeOf(IcmpHeader));
+}
+
+test "Metrics.none does nothing" {
+    var metrics = Metrics{ .none = {} };
+    metrics.inc_ping(false);
+    metrics.inc_reconnect(true);
+    metrics.flush();
+}
+
+test "PrometheusMetrics accumulates counters" {
+    var prom = Metrics.PrometheusMetrics{
+        .path = "/tmp/test.prom",
+        .ping_err = 0,
+        .recconnect_ok = 0,
+        .recconnect_err = 0,
+    };
+
+    prom.inc_ping(false);
+    prom.inc_ping(false);
+    prom.inc_ping(true);
+    try std.testing.expectEqual(2, prom.ping_err);
+
+    prom.inc_reconnect(true);
+    prom.inc_reconnect(false);
+    try std.testing.expectEqual(1, prom.recconnect_ok);
+    try std.testing.expectEqual(1, prom.recconnect_err);
+}
+
+test "TelegrafMetrics queues events" {
+    var tg = Metrics.TelegrafMetrics{
+        .path = undefined,
+        .queue_tag = undefined,
+        .queue_time = undefined,
+        .queue_len = 0,
+    };
+
+    tg.inc_ping(false);
+    try std.testing.expectEqual(1, tg.queue_len);
+    try std.testing.expectEqual(Metrics.TelegrafMetrics.Tag.ping_err, tg.queue_tag[0]);
+
+    tg.inc_reconnect(true);
+    try std.testing.expectEqual(2, tg.queue_len);
+    try std.testing.expectEqual(Metrics.TelegrafMetrics.Tag.reconnect_ok, tg.queue_tag[1]);
+}
+
+test "TelegrafMetrics resets queue after reaching capacity" {
+    var tg = Metrics.TelegrafMetrics{
+        .path = undefined,
+        .queue_tag = undefined,
+        .queue_time = undefined,
+        .queue_len = 0,
+    };
+
+    for (0..16) |_| {
+        tg.inc_ping(true);
+    }
+    try std.testing.expectEqual(0, tg.queue_len);
 }
