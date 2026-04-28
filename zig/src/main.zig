@@ -111,10 +111,12 @@ fn ping(args: Args) !u8 {
             args.target_ip.getOsSockLen(),
         ) catch |e| {
             logln("ERR {d}: Failed to send: {}", .{ i, e });
+            args.metrics.inc_ping(false);
             continue;
         };
 
         if (sent != packet.len) {
+            args.metrics.inc_ping(false);
             continue;
         }
 
@@ -128,6 +130,7 @@ fn ping(args: Args) !u8 {
             null,
         ) catch |e| {
             logln("ERR {d}: Receive error: {}", .{ i, e });
+            args.metrics.inc_ping(false);
             continue;
         };
 
@@ -136,6 +139,7 @@ fn ping(args: Args) !u8 {
             icmp_packet = recv_buf[ip_header_len..recv_len];
             if (checksum(icmp_packet) != 0) {
                 logln("ERR {d}: Checksum is not zero", .{i});
+                args.metrics.inc_ping(false);
                 continue;
             }
         } else {
@@ -144,6 +148,7 @@ fn ping(args: Args) !u8 {
 
         if (icmp_packet.len < @sizeOf(IcmpHeader)) {
             logln("ERR {d}: Bad length ({d} < {d})", .{ i, icmp_packet.len, @sizeOf(IcmpHeader) });
+            args.metrics.inc_ping(false);
             continue;
         }
 
@@ -152,6 +157,7 @@ fn ping(args: Args) !u8 {
             if (i > 0) {
                 logln("Ok {d}: Recovered connection", .{i});
             }
+            args.metrics.inc_ping(true);
             return @intCast(i);
         }
     }
@@ -181,68 +187,170 @@ fn reconnect(args: Args) !bool {
 
     var child = std.process.Child.init(cmd, allocator);
     const term = try child.spawnAndWait();
-    return switch (term) {
+    const success = switch (term) {
         .Exited => |code| code == 0,
         else => false,
     };
+    args.metrics.inc_reconnect(success);
+    return success;
 }
 
-const Metrics = struct {
-    path: []const u8,
-    ping_err: u32,
-    recconnect_ok: u32,
-    recconnect_err: u32,
+const MetricsBackend = enum {
+    prometheus,
+    telegraf,
+};
+
+const Metrics = union(MetricsBackend) {
+    none: void,
+    prometheus: PrometheusMetrics,
+    telegraf: TelegrafMetrics,
+
+    const PrometheusMetrics = struct {
+        path: []const u8,
+        ping_err: u32,
+        recconnect_ok: u32,
+        recconnect_err: u32,
+
+        fn inc_ping(self: *@This(), success: bool) void {
+            if (!success) {
+                self.ping_err +|= 1;
+            }
+        }
+
+        fn inc_reconnect(self: *@This(), success: bool) void {
+            if (success) {
+                self.recconnect_ok +|= 1;
+            } else {
+                self.recconnect_err +|= 1;
+            }
+        }
+
+        fn flush(self: @This()) void {
+            const Inner = struct {
+                fn flush(outer: PrometheusMetrics) !void {
+                    const file = try std.fs.cwd().createFile(outer.path, .{ .mode = 0o644 });
+                    defer file.close();
+
+                    var buffer: [4096]u8 = undefined;
+
+                    var file_writer = file.writer(&buffer);
+                    const writer = &file_writer.interface;
+
+                    try writer.print("# HELP wifidog_ping_error_total Total number of pings that did not get a successful answer\n", .{});
+                    try writer.print("# TYPE wifidog_ping_error_total counter\n", .{});
+                    try writer.print("wifidog_ping_error_total {d}\n", .{outer.ping_err});
+                    try writer.print("# HELP wifidog_reconnect_total Total number of reconnect attempetd by success\n", .{});
+                    try writer.print("# TYPE wifidog_reconnect_total counter\n", .{});
+                    try writer.print("wifidog_reconnect_total{{success=\"true\"}} {d}\n", .{outer.recconnect_ok});
+                    try writer.print("wifidog_reconnect_total{{success=\"false\"}} {d}\n", .{outer.recconnect_err});
+                    try writer.flush();
+                }
+            };
+
+            Inner.flush(self) catch |e| {
+                logln("ERR: Failed to write metrics: {}", .{e});
+            };
+        }
+    };
+
+    const TelegrafMetrics = struct {
+        const Tag = enum { ping_ok, ping_err, reconnect_ok, reconnect_err };
+
+        path: std.posix.sockaddr.un,
+        queue_tag: [16]Tag,
+        queue_time: [16]i128,
+        queue_len: u4,
+
+        fn inc_ping(self: *@This(), success: bool) void {
+            self.inc(if (success) Tag.ping_ok else Tag.ping_err);
+        }
+
+        fn inc_reconnect(self: *@This(), success: bool) void {
+            self.inc(if (success) Tag.reconnect_ok else Tag.reconnect_err);
+        }
+
+        fn inc(self: *@This(), tag: Tag) void {
+            self.queue_tag[self.queue_len] = tag;
+            self.queue_time[self.queue_len] = std.time.nanoTimestamp();
+
+            if (self.queue_len == 15) {
+                self.flush();
+                self.queue_len = 0;
+            } else {
+                self.queue_len += 1;
+            }
+        }
+
+        fn flush(self: @This()) void {
+            const Inner = struct {
+                fn flush(outer: TelegrafMetrics) !void {
+                    const sockfd = try std.posix.socket(
+                        std.posix.AF.UNIX,
+                        std.posix.SOCK.DGRAM,
+                        0,
+                    );
+                    defer std.posix.close(sockfd);
+
+                    var buffer: [1024]u8 = undefined;
+                    var writer = std.io.Writer.fixed(&buffer);
+
+                    for (outer.queue_tag[0..outer.queue_len], outer.queue_time[0..outer.queue_len]) |tag, time| {
+                        const msg = switch (tag) {
+                            .ping_ok => "operation=ping,status=ok value=1",
+                            .ping_err => "operation=ping,status=fail value=1",
+                            .reconnect_ok => "operation=reconnect,status=ok value=1",
+                            .reconnect_err => "operation=reconnect,status=fail value=1",
+                        };
+                        try writer.print("wifidog,{s} {d}\n", .{ msg, time });
+                    }
+                    const payload = writer.getWritten();
+
+                    _ = try std.posix.sendto(
+                        sockfd,
+                        payload,
+                        0,
+                        @ptrCast(&outer.path),
+                        @sizeOf(@TypeOf(outer.path)),
+                    );
+                }
+            };
+
+            Inner.flush(self) catch |e| {
+                logln("ERR: Failed to write metrics: {}", .{e});
+            };
+        }
+    };
 
     const Self = @This();
 
-    fn inc_ping_err(self: *Self, ping_err: u8) void {
-        self.ping_err +|= ping_err;
-        self.emit();
+    fn inc_ping(self: *Self, success: bool) void {
+        switch (self.*) {
+            .none => return,
+            .prometheus => |*prom| prom.inc_ping(success),
+            .telegraf => |*tg| tg.inc_ping(success),
+        }
     }
 
-    fn inc_reconnect_ok(self: *Self, ping_err: u8) void {
-        self.ping_err +|= ping_err;
-        self.recconnect_ok +|= 1;
-        self.emit();
+    fn inc_reconnect(self: *Self, success: bool) void {
+        switch (self.*) {
+            .none => return,
+            .prometheus => |*prom| prom.inc_reconnect(success),
+            .telegraf => |*tg| tg.inc_reconnect(success),
+        }
     }
 
-    fn inc_reconnect_err(self: *Self, ping_err: u8) void {
-        self.ping_err +|= ping_err;
-        self.recconnect_err +|= 1;
-        self.emit();
-    }
-
-    fn emit(self: Self) void {
-        const Inner = struct {
-            fn emit(outer: Self) !void {
-                const file = try std.fs.cwd().createFile(outer.path, .{ .mode = 0o644 });
-                defer file.close();
-
-                var buffer: [4096]u8 = undefined;
-
-                var file_writer = file.writer(&buffer);
-                const writer = &file_writer.interface;
-
-                try writer.print("# HELP wifidog_ping_error_total Total number of pings that did not get a successful answer\n", .{});
-                try writer.print("# TYPE wifidog_ping_error_total counter\n", .{});
-                try writer.print("wifidog_ping_error_total {d}\n", .{outer.ping_err});
-                try writer.print("# HELP wifidog_reconnect_total Total number of reconnect attempetd by success\n", .{});
-                try writer.print("# TYPE wifidog_reconnect_total counter\n", .{});
-                try writer.print("wifidog_reconnect_total{{success=\"true\"}} {d}\n", .{outer.recconnect_ok});
-                try writer.print("wifidog_reconnect_total{{success=\"false\"}} {d}\n", .{outer.recconnect_err});
-                try writer.flush();
-            }
-        };
-
-        Inner.emit(self) catch |e| {
-            logln("ERR: Failed to write metrics: {}", .{e});
-        };
+    fn flush(self: Self) void {
+        switch (self) {
+            .none => return,
+            .prometheus => |prom| prom.flush(),
+            .telegraf => |tg| tg.flush(),
+        }
     }
 };
 
 const Args = struct {
     target_ip: std.net.Address,
-    metrics: ?Metrics,
+    metrics: Metrics,
     attempts: u8,
     interval: u8,
     backoff_success: u8,
@@ -496,25 +604,15 @@ pub fn main() !void {
     while (true) {
         const attempts = try ping(args);
         if (attempts < args.attempts) {
-            if (attempts > 0) {
-                if (args.metrics) |*metrics| {
-                    metrics.inc_ping_err(attempts);
-                }
-            }
             failures = 0;
         } else {
             if (try reconnect(args)) {
                 failures +|= 1;
-                if (args.metrics) |*metrics| {
-                    metrics.inc_reconnect_ok(args.attempts);
-                }
             } else {
                 failures = std.math.maxInt(u8);
-                if (args.metrics) |*metrics| {
-                    metrics.inc_reconnect_err(args.attempts);
-                }
             }
         }
+        args.metrics.flush();
         std.Thread.sleep(get_sleep(args, failures));
     }
 }
