@@ -55,7 +55,7 @@ fn checksum(data: []const u8) u16 {
     return @truncate(~sum);
 }
 
-fn ping(args: Args) !u8 {
+fn ping(args: *Args) !u8 {
     const ICMP_ECHO = 8;
     const ICMP_ECHOREPLY = 0;
 
@@ -173,7 +173,7 @@ fn get_sleep(args: Args, failures: u8) u64 {
     };
 }
 
-fn reconnect(args: Args) !bool {
+fn reconnect(args: *Args) !bool {
     logln("Reassociating", .{});
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -285,6 +285,8 @@ const Metrics = union(MetricsBackend) {
         fn flush(self: @This()) void {
             const Inner = struct {
                 fn flush(outer: TelegrafMetrics) !void {
+                    if (outer.queue_len == 0) return;
+
                     const sockfd = try std.posix.socket(
                         std.posix.AF.UNIX,
                         std.posix.SOCK.DGRAM,
@@ -602,8 +604,10 @@ const Args = struct {
         logln("  backoff_success: {d}s", .{self.backoff_success});
         logln("  backoff_fail: {d}s", .{self.backoff_fail});
         logln("  backoff_error: {d}m", .{self.backoff_error});
-        if (self.metrics) |metrics| {
-            logln("  metrics: '{s}'", .{metrics.path});
+        switch (self.metrics) {
+            .none => {},
+            .prometheus => |prom| logln("  metrics: prometheus:'{s}'", .{prom.path}),
+            .telegraf => |tg| logln("  metrics: telegraf:'{s}'", .{std.mem.sliceTo(&tg.path.path, 0)}),
         }
         if (self.command.len > 0) {
             log("  command: '{s}", .{self.command[0]});
@@ -642,18 +646,16 @@ pub fn main() !void {
     logln("Starting wifi watchdog", .{});
     args.display();
 
-    if (args.metrics) |metrics| {
-        metrics.emit();
-    }
+    args.metrics.flush();
 
     var failures: u8 = 0;
 
     while (true) {
-        const attempts = try ping(args);
+        const attempts = try ping(&args);
         if (attempts < args.attempts) {
             failures = 0;
         } else {
-            if (try reconnect(args)) {
+            if (try reconnect(&args)) {
                 failures +|= 1;
             } else {
                 failures = std.math.maxInt(u8);
