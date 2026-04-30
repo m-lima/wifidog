@@ -106,10 +106,10 @@ pub const Metrics = union(Backend) {
 
                     for (outer.queue_tag[0..outer.queue_len], outer.queue_time[0..outer.queue_len]) |tag, time| {
                         const msg = switch (tag) {
-                            .ping_ok => "operation=ping status=1",
-                            .ping_err => "operation=ping status=0",
-                            .reconnect_ok => "operation=reconnect status=1",
-                            .reconnect_err => "operation=reconnect status=0",
+                            .ping_ok => "operation=ping,status=ok state=0",
+                            .ping_err => "operation=ping,status=fail state=1",
+                            .reconnect_ok => "operation=reconnect,status=ok state=2",
+                            .reconnect_err => "operation=reconnect,status=fail state=4",
                         };
                         try writer.print("wifidog,{s} {d}\n", .{ msg, time });
                     }
