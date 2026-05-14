@@ -17,10 +17,9 @@
     };
     helper.url = "github:m-lima/nix-template";
     zig = {
-      url = "github:mitchellh/zig-overlay";
+      url = "github:silversquirl/zig-flake";
       inputs = {
         nixpkgs.follows = "nixpkgs";
-        systems.follows = "flake-utils/systems";
       };
     };
   };
@@ -38,6 +37,7 @@
       let
         pkgs = nixpkgs.legacyPackages.${system};
         lib = pkgs.lib;
+        zigPkg = zig.packages.${system}.zig_0_15_2;
 
         go = helper.lib.go.helper inputs system ./go {
           pname = "wifidog";
@@ -56,11 +56,10 @@
 
           devPackages = pkgs: [
             zigPkg
-            pkgs.zls
+            zigPkg.zls
           ];
         };
 
-        zigPkg = zig.packages.${system}.default;
         zigSrc =
           let
             fs = lib.fileset;

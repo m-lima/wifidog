@@ -6,7 +6,7 @@ pub fn build(b: *std.Build) void {
         .preferred_optimize_mode = .ReleaseFast,
     });
 
-    const exe = b.addExecutable(.{
+    const bin_exe = b.addExecutable(.{
         .name = "wifidog",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
@@ -15,28 +15,34 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    b.installArtifact(exe);
+    b.installArtifact(bin_exe);
 
-    const run_step = b.step("run", "Run the app");
-    const run_cmd = b.addRunArtifact(exe);
-    run_step.dependOn(&run_cmd.step);
+    const exe_cmd = b.addRunArtifact(bin_exe);
+    const exe_step = b.step("run", "Run the app");
+    exe_step.dependOn(&exe_cmd.step);
 
-    run_cmd.step.dependOn(b.getInstallStep());
+    exe_cmd.step.dependOn(b.getInstallStep());
 
     if (b.args) |args| {
-        run_cmd.addArgs(args);
+        exe_cmd.addArgs(args);
     }
 
     // Creates an executable that will run `test` blocks from the executable's
     // root module. Note that test executables only test one module at a time,
     // hence why we have to create two separate ones.
-    const exe_tests = b.addTest(.{
-        .root_module = exe.root_module,
+    const test_exe = b.addTest(.{
+        .root_module = bin_exe.root_module,
     });
 
     // A run step that will run the second test executable.
-    const run_exe_tests = b.addRunArtifact(exe_tests);
-
+    const test_cmd = b.addRunArtifact(test_exe);
     const test_step = b.step("test", "Run tests");
-    test_step.dependOn(&run_exe_tests.step);
+    test_step.dependOn(&test_cmd.step);
+
+    const check_exe = b.addExecutable(.{
+        .name = "check",
+        .root_module = bin_exe.root_module,
+    });
+    const check = b.step("check", "Check if it compiles");
+    check.dependOn(&check_exe.step);
 }
